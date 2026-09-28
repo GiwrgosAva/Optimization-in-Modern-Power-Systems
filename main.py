@@ -13,9 +13,11 @@ import argparse
 from pathlib import Path
 
 import matplotlib
+import numpy as np
+
 
 from src.data_loader import load_question, list_questions
-from src.model import FlexibleConsumerModel, Results
+from src.model import FlexibleConsumerModel, LinearDisutilityModel, Results
 from src.plotting import plot_duals, plot_inputs, plot_scenario_comparison, plot_schedule
 from src.scenarios import scale_prices, scale_pv, set_tariffs
 
@@ -27,7 +29,10 @@ def run_base_case(question: str, out: Path, show: bool) -> Results | None:
     print(data.summary(), "\n")
     plot_inputs(data, save_to=out / "inputs.png")
 
-    model = FlexibleConsumerModel(data).build()
+    if "Q2" in question:
+        model = LinearDisutilityModel(data).build()
+    else:
+        model = FlexibleConsumerModel(data).build()
     try:
         results = model.solve()
     except NotImplementedError as e:
@@ -63,6 +68,29 @@ def run_scenarios(question: str, out: Path) -> dict[str, Results]:
     plot_scenario_comparison(runs, "objective", save_to=out / "scenarios_cost.png")
     return runs
 
+def run_linear_sweep(question: str, out: Path) -> dict[str, Results]:
+    """Sweep the linear disutility parameter c^L for question 2b"""
+    runs: dict[str, Results] = {}
+
+    c_values = np.linspace(0.0, 3.0, 7)
+
+    for c in c_values:
+        name = f"cL_{c:.2f}"
+
+        data = load_question(question)
+        data.linear_disutility = c
+
+        model = LinearDisutilityModel(data).build()
+        results = model.solve()
+
+        results.save(out, tag=name)
+        runs[name] = results
+        print(f"{name:>14}: cost {results.objective:8.2f} DKK | total load {results.hourly['load'].sum():5.1f} kWh")
+
+        plot_scenario_comparison(runs, "objective", save_to=out / "linear_sweep_cost.png")
+        return runs
+    
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -78,7 +106,10 @@ def main() -> None:
 
     base = run_base_case(args.question, out, args.show)
     if args.scenarios and base is not None:
-        run_scenarios(args.question, out)
+        if args.question == "Q2_linear":
+            run_linear_sweep(args.question, out)
+        else:
+            run_scenarios(args.question, out)
     print(f"\nOutputs written to {out}")
 
 

@@ -92,39 +92,92 @@ class FlexibleConsumerModel:
         d, m, T = self.data, self.m, self.T
 
         # --- Decision variables --------------------------------------------------------
-        # TODO: identify and declare the decision variables of your formulation.
-        # Store every variable family in self.var["<name>"]: solve() then returns its hourly
-        # values automatically as a column of results.hourly.
-        # Pattern for hourly variables (one per hour):
-        #   self.var["<name>"] = m.addVars(T, lb=-GRB.INFINITY, vtype=GRB.CONTINUOUS, name="<name>")
-        # Pattern for a single (daily) variable:
-        #   self.var["<name>"] = m.addVar(lb=-GRB.INFINITY, vtype=GRB.CONTINUOUS, name="<name>")
-        # Notes:
-        # * gurobipy indexes the names automatically: name="<name>" in addVars(T, ...) creates
-        #   <name>[0], <name>[1], ..., <name>[23] - no need to build per-hour names yourself.
-        # * vtype: the same format takes GRB.BINARY or GRB.INTEGER if you ever need them (the
-        #   problem then becomes a MILP and dual values are no longer defined; solve() skips them).
-        # * lb defaults to 0 in gurobipy: a free variable needs an explicit lb=-GRB.INFINITY, and
-        #   a bound you want a dual for must be an explicit constraint, not lb=/ub= (see the README).
-        # * naming the families "import", "export", "load", "pv" makes the standard plots of
-        #   src/plotting.py work out of the box.
+
+        self.var["import"] = m.addVars(
+            T, lb=-GRB.INFINITY, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="import"
+        )
+
+        self.var["export"] = m.addVars(
+            T, lb=-GRB.INFINITY, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="export"
+        )
+
+        self.var["load"] = m.addVars(
+            T, lb=-GRB.INFINITY, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="load"
+        )
+
+        self.var["pv"] = m.addVars(
+            T, lb=-GRB.INFINITY, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="pv"
+        )
+
+
+        p_imp = self.var["import"]
+        p_exp = self.var["export"]
+        l     = self.var["load"]
+        g_pv  = self.var["pv"]
 
         # --- Objective ---------------------------------------------------------------
-        # TODO: express the objective function and its direction (GRB.MINIMIZE or GRB.MAXIMIZE):
-        #   m.setObjective(gp.quicksum(<expression in t> for t in T), <direction>)
-        # The input-data attributes (with units) are documented in src/data_loader.py (InputData).
+        if d.consumption_utility is not None:
+            net_utility = gp.quicksum(
+            d.consumption_utility * l[t]
+            - d.pv_marginal_cost * g_pv[t]
+            - (d.energy_price[t] + d.import_tariff) * p_imp[t]
+            + (d.energy_price[t] - d.export_tariff) * p_exp[t]
+            for t in T
+        )
+
+            m.setObjective(net_utility, GRB.MAXIMIZE)
+
+        m.update()
+        #return self
 
         # --- Constraints -------------------------------------------------------------
-        # TODO: add the constraints of your formulation.
-        # Pattern for hourly constraints (one per hour, duals returned as a 24-vector; names are
-        # indexed automatically, like for the variables):
-        #   self.con["<name>"] = m.addConstrs(
-        #       (<lhs expression> - <rhs expression> <= 0 for t in T), name="<name>")
-        # Pattern for a single constraint (dual returned as a scalar):
-        #   self.con["<name>"] = m.addConstr(<lhs expression> - <rhs expression> <= 0, name="<name>")
+        # 1. Hourly Power Balance: Load + Export = PV + Import
+
+        self.con["balance"] = m.addConstrs(
+            (l[t] + p_exp[t] == g_pv[t] + p_imp[t] for t in T), name="balance"
+        )
+
+        # 2. PV availability Upper Bound: 0 <= g_PV <= PV_MAX
+
+        self.con["pv_max"] = m.addConstrs(
+            (g_pv[t] - d.pv_available[t] <= 0 for t in T),
+            name="pv_max"
+        )
+
+        # 3. Load Capacity Upper Bound: 0 <= l <= LOAD_MAX
+
+        self.con["load_max"] = m.addConstrs(
+            (l[t] - d.load_max_kWh <= 0 for t in T),
+            name="load_max"
+        )
+
+        # 4. Load Capacity Lower Bound: 0 <= l
+
+        self.con["load_min"] = m.addConstrs(
+            (d.load_min_kWh - l[t] <= 0 for t in T),
+            name="load_min"
+        )
+
+        # 5. Non negativity constraints
+
+        self.con["import_min"] = m.addConstrs(
+            (p_imp[t] >= 0 for t in T),
+            name="import_min"
+        )
+
+        self.con["export_min"] = m.addConstrs(
+            (p_exp[t] >= 0 for t in T),
+            name="export_min"
+        )
+
+        self.con["pv_min"] = m.addConstrs(
+            (g_pv[t] >= 0 for t in T),
+            name="pv_min"
+        )
 
         m.update()
         return self
+
 
     # ------------------------------------------------------------------ 3. solve
     def solve(self) -> Results:
@@ -187,3 +240,45 @@ _STATUS = {
 
 def _status_name(code: int) -> str:
     return _STATUS.get(code, f"STATUS_{code}")
+
+class LinearDisutilityModel(FlexibleConsumerModel):
+    """Question 2.(b): Flexible Consumer with a linear disutility penalty."""
+
+    def build(self) -> "LinearDisutilityModel":
+        # 1. Inherit variables and physical constraints from Q1.
+        super().build()
+
+        d, m, T = self.data, self.m, self.T
+        l = self.var["load"]
+        p_imp = self.var["import"]
+        p_exp = self.var["export"]
+        g_pv = self.var["pv"]
+
+        # 2. Add the continuous auxiliary variable Delta
+        self.var["delta"] = m.addVars(
+            T, lb=0.0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="delta"
+        )
+        delta = self.var["delta"]
+
+        # 3. Add the two linear constraints for absolute deviation
+        self.con["delta_pos"] = m.addConstrs(
+            (delta[t] >= l[t] - d.reference_load[t] for t in T), name="delta_pos"
+        )
+
+        self.con["delta_neg"] = m.addConstrs(
+            (delta[t] >= d.reference_load[t] - l[t] for t in T), name="delta_neg"
+        )
+
+        # 4. Update the objective function
+        net_utility = gp.quicksum(
+            - d.pv_marginal_cost * g_pv[t]
+            - (d.energy_price[t] + d.import_tariff) * p_imp[t]
+            + (d.energy_price[t] - d.export_tariff) * p_exp[t]
+            - d.linear_disutility * delta[t]
+            for t in T
+        )
+
+        m.setObjective(net_utility, GRB.MAXIMIZE)
+        m.update()
+        return self
+    

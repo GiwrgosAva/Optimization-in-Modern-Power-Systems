@@ -18,6 +18,7 @@ import numpy as np
 
 from src.data_loader import load_question, list_questions
 from src.model import FlexibleConsumerModel, LinearDisutilityModel, Results
+from src.model import FlexibleConsumerModel, LinearDisutilityModel, QuadraticDisutilityModel, Results
 from src.plotting import plot_duals, plot_inputs, plot_scenario_comparison, plot_schedule
 from src.scenarios import scale_prices, scale_pv, set_tariffs
 
@@ -29,8 +30,10 @@ def run_base_case(question: str, out: Path, show: bool) -> Results | None:
     print(data.summary(), "\n")
     plot_inputs(data, save_to=out / "inputs.png")
 
-    if "Q2" in question:
+    if "Q2_linear" in question:
         model = LinearDisutilityModel(data).build()
+    elif "Q2_quadratic" in question:
+        model = QuadraticDisutilityModel(data).build()
     else:
         model = FlexibleConsumerModel(data).build()
     try:
@@ -89,7 +92,28 @@ def run_linear_sweep(question: str, out: Path) -> dict[str, Results]:
 
         plot_scenario_comparison(runs, "objective", save_to=out / "linear_sweep_cost.png")
         return runs
-    
+
+def run_quadratic_sweep(question: str, out: Path) -> dict[str, Results]:
+    """Sweep the quadratic disutility parameter c^Q for question 2c"""
+    runs: dict[str, Results] = {}
+
+    c_values = np.linspace(0.0, 0.5, 7)
+
+    for c in c_values:
+        name = f"cQ_{c:.3f}"
+        
+        data = load_question(question)
+        data.quadratic_disutility = c
+
+        model = QuadraticDisutilityModel(data).build()
+        results = model.solve()
+
+        results.save(out, tag=name)
+        runs[name] = results
+        print(f"{name:>14}: cost {results.objective:8.2f} DKK | total load {results.hourly['load'].sum():5.1f} kWh")
+
+    plot_scenario_comparison(runs, "objective", save_to=out / "quadratic_sweep_cost.png")
+    return runs    
 
 
 def main() -> None:
@@ -108,6 +132,8 @@ def main() -> None:
     if args.scenarios and base is not None:
         if args.question == "Q2_linear":
             run_linear_sweep(args.question, out)
+        elif args.question == "Q2_quadratic":
+            run_quadratic_sweep(args.question, out)
         else:
             run_scenarios(args.question, out)
     print(f"\nOutputs written to {out}")
@@ -115,3 +141,25 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+def run_quadratic_sweep(question: str, out: Path) -> dict[str, Results]:
+    """Sweep the quadratic disutility parameter c^Q for question 2c"""
+    runs: dict[str, Results] = {}
+
+    c_values = np.linspace(0.0, 0.5, 7)
+
+    for c in c_values:
+        name = f"cQ_{c:.3f}"
+
+        data = load_question(question)
+        data.quadratic_disutility = c
+
+        model = QuadraticDisutilityModel(data).build()
+        results = model.solve()
+
+        results.save(out, tag=name)
+        runs[name] = results
+        print(f"{name:>14}: cost {results.objective:8.2f} DKK | total load {results.hourly['load'].sum():5.1f} kWh")
+
+    plot_scenario_comparison(runs, "objective", save_to=out / "quadratic_sweep_cost.png")
+    return runs

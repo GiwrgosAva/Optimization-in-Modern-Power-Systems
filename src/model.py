@@ -281,4 +281,30 @@ class LinearDisutilityModel(FlexibleConsumerModel):
         m.setObjective(net_utility, GRB.MAXIMIZE)
         m.update()
         return self
-    
+
+class QuadraticDisutilityModel(FlexibleConsumerModel):
+    """Question 2.(c): Flexible Consumer with a quadratic disutility penalty."""
+
+    def build(self) -> "QuadraticDisutilityModel":
+        # 1. Inherit variables and physical constraints from Q1.
+        super().build()
+
+        d, m, T = self.data, self.m, self.T
+        l = self.var["load"]
+        p_imp = self.var["import"]
+        p_exp = self.var["export"]
+        g_pv = self.var["pv"]
+
+        # 2. Update the objective function
+        net_utility = gp.quicksum(
+            - d.pv_marginal_cost * g_pv[t]
+            - (d.energy_price[t] + d.import_tariff) * p_imp[t]
+            + (d.energy_price[t] - d.export_tariff) * p_exp[t]
+            - d.quadratic_disutility * (l[t] - d.reference_load[t]) * (l[t] - d.reference_load[t])
+            for t in T
+        )
+
+        m.setObjective(net_utility, GRB.MAXIMIZE)
+        m.update()
+        return self
+

@@ -1,0 +1,48 @@
+[33mcommit f9e15cf768f2840186ec24a279fc26404239723c[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Author: Francis Koumoulis <s253310@dtu.dk>
+Date:   Tue Oct 6 16:52:24 2026 +0200
+
+    Q2 Quadratic
+
+ main.py      | 52 [32m++++++++++++++++++++++++++++++++++++++++++++++++++[m[31m--[m
+ src/model.py | 28 [32m+++++++++++++++++++++++++++[m[31m-[m
+ 2 files changed, 77 insertions(+), 3 deletions(-)
+
+[33mcommit 79c7fe60abed43e269dbb98b042a226fd3a50e2e[m
+Author: Francis Koumoulis <s253310@dtu.dk>
+Date:   Mon Sep 28 17:36:08 2026 +0200
+
+    Added my files
+
+ .vscode/settings.json |   4 [32m++[m
+ main.py               |  37 [32m+++++++++++[m[31m--[m
+ src/model.py          | 147 [32m+++++++++++++++++++++++++++++++++++++++++[m[31m---------[m
+ 3 files changed, 159 insertions(+), 29 deletions(-)
+
+[33mcommit a6908e9fde87a221be23c50b536a048aa9a1a1d8[m
+Author: GiwrgosAva <giwrgosavatangelos@gmail.com>
+Date:   Mon Sep 21 21:07:40 2026 +0200
+
+    Initial commit
+
+ .gitignore                    | 212 [32m+++++++++++++[m
+ LICENSE                       | 674 [32m++++++++++++++++++++++++++++++++++++++++++[m
+ README.md                     | 212 [32m+++++++++++++[m
+ data/appliance_params.json    | 333 [32m+++++++++++++++++++++[m
+ data/bus_params.json          |  61 [32m++++[m
+ data/params_Q1_caseA.json     |  13 [32m+[m
+ data/params_Q1_caseB.json     |  13 [32m+[m
+ data/params_Q2_linear.json    |  13 [32m+[m
+ data/params_Q2_quadratic.json |  13 [32m+[m
+ data/params_Q3.json           |  13 [32m+[m
+ data/params_Q3_battery.json   |  14 [32m+[m
+ environment.yaml              |  18 [32m++[m
+ main.py                       |  86 [32m++++++[m
+ requirements.txt              |  11 [32m+[m
+ results/.gitkeep              |   0
+ src/__init__.py               |   9 [32m+[m
+ src/data_loader.py            | 273 [32m+++++++++++++++++[m
+ src/model.py                  | 189 [32m++++++++++++[m
+ src/plotting.py               | 109 [32m+++++++[m
+ src/scenarios.py              |  71 [32m+++++[m
+ 20 files changed, 2337 insertions(+)

@@ -9,9 +9,11 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 from .data_loader import InputData
 from .model import Results
+from .scenarios import linear_thresholds, quadratic_thresholds
 
 
 def _finish(fig: plt.Figure, save_to: Path | str | None) -> plt.Figure:
@@ -107,3 +109,78 @@ def plot_scenario_comparison(
     ax.set(ylabel=ylabel, title=f"Scenario comparison - {metric}")
     ax.tick_params(axis="x", rotation=20)
     return _finish(fig, save_to)
+
+
+# ----------------------------------------------------------------------------------------------
+# Figures for the sweeps over c^L and c^Q (Questions 2.b.iv and 2.c.iv)
+# ----------------------------------------------------------------------------------------------
+def plot_load_vs_reference(results: Results, data, save_to=None, title="") -> None:
+    """Optimal hourly load against the reference profile and the available PV."""
+    h = results.hourly
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.step(h.index, h["reference_load"], where="mid", color="tab:blue", ls=":", lw=2, label="reference load")
+    ax.step(h.index, h["load"], where="mid", color="tab:red", lw=2, label="optimal load")
+    ax.fill_between(h.index, 0, h["pv_available"], step="mid", color="orange", alpha=0.25, label="PV available")
+    ax.set_xlabel("hour"); ax.set_ylabel("kWh/h"); ax.set_title(title); ax.legend(); ax.grid(alpha=0.3)
+    fig.tight_layout()
+    if save_to is not None:
+        fig.savefig(save_to, dpi=150)
+    plt.close(fig)
+
+
+
+def _plot_sweep(table: pd.DataFrame, xcol: str, xlabel: str, lines, ref_energy: float, counts: dict,
+                title: str, save_to=None, logx: bool = False) -> None:
+    """Four panels (costs, energy, deviation, hour counts) against the sweep parameter, thresholds as dotted lines."""
+    fig, ax = plt.subplots(2, 2, figsize=(11, 6.5), sharex=True)
+    x = table[xcol]
+    ax[0, 0].plot(x, table.procurement_cost, label="procurement cost")
+    ax[0, 0].plot(x, table.disutility, label="disutility")
+    ax[0, 0].plot(x, table.total_cost, "k--", label="total (= -objective)")
+    ax[0, 0].set_ylabel("DKK"); ax[0, 0].legend(fontsize=8)
+    ax[0, 1].plot(x, table.energy_consumed)
+    ax[0, 1].axhline(ref_energy, color="gray", ls="--", label="reference profile")
+    ax[0, 1].set_ylabel("daily energy consumed [kWh]"); ax[0, 1].legend(fontsize=8)
+    ax[1, 0].plot(x, table.total_abs_deviation)
+    ax[1, 0].set_ylabel("total absolute deviation [kWh]")
+    for col, label in counts.items():
+        ax[1, 1].step(x, table[col], where="post", label=label)
+    ax[1, 1].set_ylabel("number of hours"); ax[1, 1].legend(fontsize=8, loc="upper right")
+    for a in ax.ravel():
+        a.grid(alpha=0.3)
+        if logx:
+            a.set_xscale("log")
+        for v in lines:
+            a.axvline(v, color="gray", ls=":", lw=0.8, alpha=0.6)
+    for a in ax[1]:
+        a.set_xlabel(xlabel)
+    fig.suptitle(title)
+    fig.tight_layout()
+    if save_to is not None:
+        fig.savefig(save_to, dpi=150)
+    plt.close(fig)
+
+
+
+def plot_linear_sweep(table: pd.DataFrame, data, save_to=None) -> None:
+    """Daily quantities versus c^L, with the hourly thresholds of the hypothesis as dotted vertical lines."""
+    th = linear_thresholds(data)
+    lines = sorted(set(np.round(th.loc[th.lower_matters, "lower_threshold"], 4))
+                   | set(np.round(th.loc[th.upper_matters, "upper_threshold"], 4)))
+    _plot_sweep(table, "cL", "c^L [DKK/kWh]", lines, data.reference_load.sum(),
+                {"hours_bound_binding": "deviation stopped by a load bound", "hours_deviating": "hours with any deviation"},
+                "Linear disutility: sweep over c^L (dotted lines: hypothesised thresholds)", save_to)
+
+
+# ----------------------------------------------------------------------------------------------
+
+
+def plot_quadratic_sweep(table: pd.DataFrame, data, save_to=None) -> None:
+    """Daily quantities versus c^Q (log axis), with the hourly regime changes of the hypothesis as dotted lines."""
+    th = quadratic_thresholds(data)
+    values = np.round(th[["leave_Lmin", "reach_PV_level", "leave_PV_level"]].to_numpy().ravel(), 4)
+    lines = sorted(set(v for v in values if not np.isnan(v)))
+    _plot_sweep(table, "cQ", "c^Q [DKK/kWh^2]", lines, data.reference_load.sum(),
+                {"hours_bound_binding": "load at L_min", "hours_on_pv_level": "load at the available PV",
+                 "hours_deviating": "hours with any deviation"},
+                "Quadratic disutility: sweep over c^Q (dotted lines: hypothesised regime changes)", save_to, logx=True)

@@ -52,6 +52,10 @@ class Results:
         self.hourly.to_csv(folder / f"{stem}_hourly.csv", index_label="hour")
         with open(folder / f"{stem}_summary.txt", "w", encoding="utf-8") as f:
             f.write(f"status    : {self.status}\nobjective : {self.objective:.4f} DKK\n")
+            if "procurement_cost" in self.meta:
+                f.write(f"procurement cost : {self.meta['procurement_cost']:.4f} DKK\n")
+            if "utility" in self.meta:
+                f.write(f"utility          : {self.meta['utility']:.4f} DKK\n")
             for k, v in self.duals.items():
                 f.write(f"dual[{k}] : {v:.4f}\n")
 
@@ -60,6 +64,8 @@ class Results:
         return (
             f"status: {self.status} | objective: {self.objective:.2f} DKK\n"
             f"daily totals (kWh): " + ", ".join(f"{c}={self.hourly[c].sum():.1f}" for c in cols if c in ("import", "export", "load", "pv"))
+            + (f"\nprocurement cost: {self.meta['procurement_cost']:.2f} DKK" if "procurement_cost" in self.meta else "")
+            + (f" | utility: {self.meta['utility']:.2f} DKK" if "utility" in self.meta else "")
             + (f"\nduals: {self.duals}" if self.duals else "")
         )
 
@@ -83,11 +89,12 @@ class FlexibleConsumerModel:
 
     # ------------------------------------------------------------------ 2. build
     def build(self) -> "FlexibleConsumerModel":
-        """Declare decision variables, objective and constraints.
+        """Declare decision variables, objective and constraints of Question 1.
 
-        TODO (Question 1): complete this method with the variables, objective and constraints
-        of the problem you formulated in Question 1. Keep the naming pattern below so
-        that ``solve()`` can return the primal and dual values automatically.
+        Variables (kWh/h, one per hour): import, export, load, pv. Objective (only if the case has a
+        consumption utility): maximise utility - PV cost - import cost + export revenue (DKK).
+        Constraints: power balance, PV limit, load bounds and non-negativity, all stored in ``self.con``
+        so that their duals are returned by ``solve()``. Returns ``self``.
         """
         d, m, T = self.data, self.m, self.T
 
@@ -128,7 +135,6 @@ class FlexibleConsumerModel:
             m.setObjective(net_utility, GRB.MAXIMIZE)
 
         m.update()
-        #return self
 
         # --- Constraints -------------------------------------------------------------
         # 1. Hourly Power Balance: Load + Export = PV + Import
@@ -221,13 +227,24 @@ class FlexibleConsumerModel:
                 # No duals available (e.g. model with integer variables)
                 pass
 
+        # Cost split in DKK/day: procurement = grid purchases - export revenue + PV production cost
+        p_imp = d.energy_price + d.import_tariff       # effective import price, DKK/kWh
+        p_exp = d.energy_price - d.export_tariff       # effective export price, DKK/kWh
+        meta = {
+            "scalar_variables": scalars,
+            "procurement_cost": float((p_imp * hourly["import"] - p_exp * hourly["export"]
+                                       + d.pv_marginal_cost * hourly["pv"]).sum()),
+        }
+        if d.consumption_utility is not None:           # Question 1 only: utility of the consumed energy
+            meta["utility"] = float(d.consumption_utility * hourly["load"].sum())
+
         return Results(
             question=d.question,
             status=status,
             objective=self.m.ObjVal,
             hourly=hourly,
             duals=duals,
-            meta={"scalar_variables": scalars},
+            meta=meta,
         )
 
 
@@ -245,6 +262,8 @@ class LinearDisutilityModel(FlexibleConsumerModel):
     """Question 2.(b): Flexible Consumer with a linear disutility penalty."""
 
     def build(self) -> "LinearDisutilityModel":
+        """Add auxiliary deviation variables delta_t >= |l_t - l_ref_t| and the objective without utility
+        (maximise -(procurement cost) - c^L * sum delta_t). Needs ``reference_load`` and ``linear_disutility``."""
         # 1. Inherit variables and physical constraints from Q1.
         super().build()
 
@@ -286,6 +305,8 @@ class QuadraticDisutilityModel(FlexibleConsumerModel):
     """Question 2.(c): Flexible Consumer with a quadratic disutility penalty."""
 
     def build(self) -> "QuadraticDisutilityModel":
+        """Set the objective without utility: maximise -(procurement cost) - c^Q * sum (l_t - l_ref_t)^2.
+        Needs ``reference_load`` and ``quadratic_disutility`` (DKK/kWh^2)."""
         # 1. Inherit variables and physical constraints from Q1.
         super().build()
 
@@ -308,3 +329,109 @@ class QuadraticDisutilityModel(FlexibleConsumerModel):
         m.update()
         return self
 
+
+
+class TemporalDisutilityModel(FlexibleConsumerModel):
+    """Question 2.(e): flexible consumer whose discomfort accumulates over consecutive hours.
+
+    Discomfort state:  x_t = memory * x_{t-1} + (l_t - l_ref_t),   with x_{-1} = 0
+    Disutility:        cost * sum_t x_t**2          (convex, but NOT separable in time)
+
+    Parameters (chosen in Question 2.(e).ii)
+    ----------------------------------------
+    memory : share of the discomfort of one hour that is still felt in the next hour, 0 <= memory < 1
+             (memory = 0 gives the separable quadratic model of Question 2.(c)).
+    cost   : DKK/kWh^2. If None it is calibrated to Question 2.(c): cost = c^Q * (1 - memory)**2,
+             so that a deviation sustained for many hours costs per hour as much as in (c).
+    """
+
+    def __init__(self, data: InputData, memory: float = 0.7, cost: float | None = None,
+                 name: str = "temporal_disutility", verbose: bool = False):
+        super().__init__(data, name=name, verbose=verbose)
+        if data.reference_load is None:
+            raise ValueError("TemporalDisutilityModel needs a reference load profile (use the Q2_quadratic data).")
+        if not 0.0 <= memory < 1.0:
+            raise ValueError("memory must satisfy 0 <= memory < 1.")
+        if cost is None:
+            if data.quadratic_disutility is None:
+                raise ValueError("Give 'cost' explicitly or use data with a quadratic_disutility (Q2_quadratic).")
+            cost = data.quadratic_disutility * (1.0 - memory) ** 2
+        self.memory = memory
+        self.cost = cost
+
+    def build(self) -> "TemporalDisutilityModel":
+        """Add the discomfort state x_t with its dynamics and the objective with cost * sum x_t^2."""
+        # 1. Inherit variables and physical constraints from Q1.
+        super().build()
+
+        d, m, T = self.data, self.m, self.T
+        l = self.var["load"]
+        p_imp = self.var["import"]
+        p_exp = self.var["export"]
+        g_pv = self.var["pv"]
+        a, c_T = self.memory, self.cost
+
+        # 2. Discomfort state x_t (free variable) and its dynamics
+        self.var["state"] = m.addVars(
+            T, lb=-GRB.INFINITY, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="state"
+        )
+        x = self.var["state"]
+
+        # x_0 = l_0 - l_ref_0 ;  x_t = a * x_{t-1} + l_t - l_ref_t  for t >= 1
+        self.con["state_dynamics"] = m.addConstrs(
+            (x[t] == (a * x[t - 1] if t > 0 else 0) + l[t] - d.reference_load[t] for t in T),
+            name="state_dynamics",
+        )
+
+        # 3. Objective: procurement cost + disutility of the accumulated discomfort
+        net_utility = gp.quicksum(
+            - d.pv_marginal_cost * g_pv[t]
+            - (d.energy_price[t] + d.import_tariff) * p_imp[t]
+            + (d.energy_price[t] - d.export_tariff) * p_exp[t]
+            - c_T * x[t] * x[t]
+            for t in T
+        )
+
+        m.setObjective(net_utility, GRB.MAXIMIZE)
+        m.update()
+        return self
+
+
+
+class MinEnergyModel(QuadraticDisutilityModel):
+    """Question 3.(d): quadratic disutility of Question 2.(c) plus a minimum daily energy consumption.
+
+    Extra constraint (the only change compared with Question 2.(c)):  sum_t l_t >= E^min.
+    Its dual variable is eta >= 0 (DKK/kWh), the marginal cost of the daily requirement.
+
+    Parameters
+    ----------
+    min_energy : E^min in kWh. If None, ``data.min_daily_energy_kWh`` (from the data files) is used.
+    """
+
+    def __init__(self, data: InputData, min_energy: float | None = None,
+                 name: str = "min_energy", verbose: bool = False):
+        super().__init__(data, name=name, verbose=verbose)
+        e_min = data.min_daily_energy_kWh if min_energy is None else min_energy
+        if e_min is None:
+            raise ValueError("Give 'min_energy' or use data with min_total_energy_per_day_kWh (Q3 data).")
+        if e_min > data.n_hours * data.load_max_kWh + 1e-9:
+            raise ValueError(f"E^min = {e_min} kWh is infeasible: it exceeds 24 * L^max = "
+                             f"{data.n_hours * data.load_max_kWh} kWh.")
+        self.min_energy = e_min
+
+    def build(self) -> "MinEnergyModel":
+        """Build the model of Question 2.(c) and add the daily constraint sum_t l_t >= E^min."""
+        super().build()
+        l = self.var["load"]
+        self.con["min_energy"] = self.m.addConstr(
+            gp.quicksum(l[t] for t in self.T) >= self.min_energy, name="min_energy"
+        )
+        self.m.update()
+        return self
+
+    def solve(self) -> Results:
+        """Solve and report eta = -Pi of the daily constraint (Gurobi's Pi is d(objective)/d(E^min) <= 0)."""
+        results = super().solve()
+        results.duals["mu"] = -results.duals.pop("min_energy")
+        return results

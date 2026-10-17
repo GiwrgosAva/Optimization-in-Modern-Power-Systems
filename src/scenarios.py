@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from .data_loader import InputData, load_question
-from .model import LinearDisutilityModel, QuadraticDisutilityModel, Results
+from .model import LinearDisutilityModel, QuadraticDisutilityModel, TemporalDisutilityModel, Results
 
 
 def scale_prices(data: InputData, factor: float, keep_mean: bool = False) -> InputData:
@@ -174,3 +174,54 @@ def solve_quadratic(question: str, cQ: float):
     data = load_question(question)
     data.quadratic_disutility = float(cQ)
     return QuadraticDisutilityModel(data).build().solve(), data
+
+# ----------------------------------------------------------------------------------------------
+# Question 2.e.iv - effect of the temporal structure of the prices
+# ----------------------------------------------------------------------------------------------
+def square_wave_prices(mean: float, amplitude: float, block_hours: int, start_high: bool = True, n_hours: int = 24) -> np.ndarray:
+    """Hourly prices alternating between ``mean + amplitude`` and ``mean - amplitude`` in blocks of ``block_hours`` hours.
+
+    All block lengths contain the same set of prices (12 high and 12 low hours): only their order changes.
+    """
+    t = np.arange(n_hours)
+    high = ((t // block_hours) % 2 == 0) == start_high
+    return np.where(high, mean + amplitude, mean - amplitude)
+
+
+def solve_model(model: str, data: InputData):
+    """Solve 'linear', 'quadratic' or 'temporal' for the given data. Returns (results, disutility in DKK)."""
+    ref = data.reference_load
+    if model == "linear":
+        res = LinearDisutilityModel(data).build().solve()
+        return res, data.linear_disutility * float(np.abs(res.hourly["load"] - ref).sum())
+    if model == "quadratic":
+        res = QuadraticDisutilityModel(data).build().solve()
+        return res, data.quadratic_disutility * float(((res.hourly["load"] - ref) ** 2).sum())
+    if model == "temporal":
+        m = TemporalDisutilityModel(data).build()
+        res = m.solve()
+        return res, m.cost * float((res.hourly["state"] ** 2).sum())
+    raise ValueError(f"unknown model {model!r}")
+
+
+def price_structure_metrics(results: Results, data: InputData, disutility: float) -> dict:
+    """Daily surplus and deviations of one run.
+
+    surplus = (cost of consuming exactly the reference) - (procurement cost) - (disutility)
+            = value of flexibility, in DKK/day. Consuming the reference has zero disutility in every model,
+              so this number is measured against the same baseline for all models.
+    """
+    h = results.hourly
+    p_imp = h["price"] + data.import_tariff
+    p_exp = h["price"] - data.export_tariff
+    procurement = (p_imp * h["import"] - p_exp * h["export"] + data.pv_marginal_cost * h["pv"]).sum()
+    baseline = (p_imp * h["reference_load"]).sum()          # no PV in this experiment: the reference is bought from the grid
+    deviation = h["load"] - h["reference_load"]
+    return {
+        "surplus": baseline - procurement - disutility,
+        "procurement_cost": procurement,
+        "disutility": disutility,
+        "total_abs_deviation": float(deviation.abs().sum()),
+        "energy_consumed": float(h["load"].sum()),
+        "max_discomfort_state": float(h["state"].abs().max()) if "state" in h else float("nan"),
+    }

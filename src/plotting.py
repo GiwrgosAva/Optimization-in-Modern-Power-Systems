@@ -65,7 +65,11 @@ def plot_schedule(results: Results, data: InputData, save_to: Path | str | None 
     if "reference_load" in hr:
         ax.step(h, hr["reference_load"], where="mid", color="C0", ls=":", label="reference load")
     ax.axhline(0, color="grey", lw=0.8)
-    ax.set(xlabel="hour", ylabel="kWh/h", title=f"Optimal schedule - {results.question} (cost {results.objective:.1f} DKK)")
+    if data.consumption_utility is not None:  # Question 1: the objective is a surplus
+        value = f"net utility {results.objective:.2f} DKK"
+    else:  # Question 2/3: objective = -(procurement + disutility)
+        value = f"total cost {-results.objective:.2f} DKK"
+    ax.set(xlabel="hour", ylabel="kWh/h", title=f"Optimal schedule - {results.question} ({value})")
 
     ax2 = ax.twinx()
     ax2.step(h, hr["price"], where="mid", color="C3", lw=1.2, label="energy price")
@@ -184,3 +188,54 @@ def plot_quadratic_sweep(table: pd.DataFrame, data, save_to=None) -> None:
                 {"hours_bound_binding": "load at L_min", "hours_on_pv_level": "load at the available PV",
                  "hours_deviating": "hours with any deviation"},
                 "Quadratic disutility: sweep over c^Q (dotted lines: hypothesised regime changes)", save_to, logx=True)
+
+# ----------------------------------------------------------------------------------------------
+# Figure for Question 2.e.iv
+# ----------------------------------------------------------------------------------------------
+def plot_price_structure(table, examples, save_to=None) -> None:
+    """Left: surplus and total deviation against the block length of the high prices, one line per model.
+    Right: load of the time-coupled model for the fastest and the slowest price alternation.
+
+    ``table`` has columns model, block_hours, surplus, total_abs_deviation (averaged over the two phases).
+    ``examples`` is a list of (title, prices, results) for the right-hand panels.
+    """
+    styles = {"linear": ("tab:green", "o"), "quadratic": ("tab:red", "s"), "temporal": ("tab:blue", "^")}
+    fig = plt.figure(figsize=(12, 7))
+    gs = fig.add_gridspec(2, 2 + 0, width_ratios=[1, 1.2])
+    ax1, ax2 = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[1, 0])
+    for model, (color, marker) in styles.items():
+        t = table[table.model == model].sort_values("block_hours")
+        ax1.plot(t.block_hours, t.surplus, marker=marker, color=color, label=model)
+        ax2.plot(t.block_hours, t.total_abs_deviation, marker=marker, color=color, label=model)
+    for ax, ylabel in ((ax1, "daily surplus [DKK]"), (ax2, "total absolute deviation [kWh]")):
+        ax.set_xscale("log"); ax.set_xticks(sorted(table.block_hours.unique())); ax.set_xticklabels(sorted(table.block_hours.unique()))
+        ax.set_xlabel("length of a block of high prices [h]"); ax.set_ylabel(ylabel); ax.grid(alpha=0.3); ax.legend(fontsize=8)
+    for k, (title, prices, res) in enumerate(examples[:2]):
+        ax = fig.add_subplot(gs[k, 1])
+        h = res.hourly
+        ax.step(h.index, h["reference_load"], where="mid", color="tab:blue", ls=":", lw=2, label="reference load")
+        ax.step(h.index, h["load"], where="mid", color="tab:blue", lw=2, label="load (time-coupled model)")
+        ax.set_xlabel("hour"); ax.set_ylabel("kWh/h"); ax.set_title(title, fontsize=9); ax.grid(alpha=0.3)
+        ax2b = ax.twinx(); ax2b.step(h.index, prices, where="mid", color="tab:red", lw=1.2); ax2b.set_ylabel("energy price [DKK/kWh]", color="tab:red")
+        if k == 1:
+            ax.legend(fontsize=8, loc="upper right")
+    fig.tight_layout()
+    if save_to is not None:
+        fig.savefig(save_to, dpi=150)
+    plt.close(fig)
+
+
+def plot_load_comparison(results: Results, unconstrained: Results, data: InputData,
+                         save_to: Path | str | None = None) -> plt.Figure:
+    """Question 3.(e): load with the minimum-energy requirement, load of Question 2.(c) and the reference profile."""
+    h, h0 = results.hourly, unconstrained.hourly
+    fig, ax = plt.subplots(figsize=(10, 4.8))
+    ax.fill_between(h.index, 0, h["pv_available"], step="mid", color="orange", alpha=0.2, label="PV available")
+    ax.step(h.index, h["reference_load"], where="mid", color="tab:blue", ls=":", lw=2, label="reference load")
+    ax.step(h0.index, h0["load"], where="mid", color="tab:green", lw=2,
+            label=f"Question 2.(c) ({h0['load'].sum():.1f} kWh/day)")
+    ax.step(h.index, h["load"], where="mid", color="tab:red", lw=2,
+            label=f"with $E^{{min}}$ = {data.min_daily_energy_kWh:.0f} kWh ({h['load'].sum():.1f} kWh/day)")
+    ax.set(xlabel="hour", ylabel="kWh/h", title="Optimal load - Q3 base case")
+    ax.legend(); ax.grid(alpha=0.3)
+    return _finish(fig, save_to)

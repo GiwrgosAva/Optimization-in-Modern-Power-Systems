@@ -435,3 +435,32 @@ class MinEnergyModel(QuadraticDisutilityModel):
         results = super().solve()
         results.duals["mu"] = -results.duals.pop("min_energy")
         return results
+
+class BatteryModel(MinEnergyModel):
+    """Question 3.(g): minimum daily energy (3.d) plus a small battery.
+    The state of charge returns to E_0 at the end of the horizon."""
+
+    def __init__(self, data: InputData, min_energy: float | None = None, name: str = "battery", verbose: bool = False):
+        super().__init__(data, min_energy=min_energy, name=name, verbose=verbose)
+        if data.battery_capacity_kWh is None:
+            raise ValueError("BatteryModel needs data with a battery (use the Q3_battery case).")
+
+    def build(self) -> "BatteryModel":
+        super().build()
+        d, m, T = self.data, self.m, self.T
+        e0 = d.battery_initial_soc_kWh
+        self.var["charge"] = m.addVars(T, lb=0.0, ub=d.battery_max_charge_kW, vtype=GRB.CONTINUOUS, name="charge")
+        self.var["discharge"] = m.addVars(T, lb=0.0, ub=d.battery_max_discharge_kW, vtype=GRB.CONTINUOUS, name="discharge")
+        self.var["soc"] = m.addVars(T, lb=0.0, ub=d.battery_capacity_kWh, vtype=GRB.CONTINUOUS, name="soc")
+        charge, discharge, soc = self.var["charge"], self.var["discharge"], self.var["soc"]
+        m.update()
+        for t in T:
+            m.chgCoeff(self.con["balance"][t], charge[t], 1.0)
+            m.chgCoeff(self.con["balance"][t], discharge[t], -1.0)
+        self.con["soc_dynamics"] = m.addConstrs(
+            (soc[t] == (soc[t - 1] if t > 0 else e0)
+             + d.battery_charging_efficiency * charge[t] - (1.0 / d.battery_discharging_efficiency) * discharge[t]
+             for t in T), name="soc_dynamics")
+        self.con["soc_final"] = m.addConstr(soc[T[-1]] == e0, name="soc_final")
+        m.update()
+        return self

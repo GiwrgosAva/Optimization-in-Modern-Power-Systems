@@ -239,3 +239,106 @@ def plot_load_comparison(results: Results, unconstrained: Results, data: InputDa
     ax.set(xlabel="hour", ylabel="kWh/h", title="Optimal load - Q3 base case")
     ax.legend(); ax.grid(alpha=0.3)
     return _finish(fig, save_to)
+
+def plot_min_energy_sweep(table, thresholds: dict, save_costs: Path | str | None = None,
+                          save_hours: Path | str | None = None):
+    """Question 3.(f): two figures against E^min (dotted lines: thresholds in kWh).
+    First figure: costs and marginal cost mu. Second figure: number of hours in each situation."""
+    x = table["E_min"]
+
+    def mark(axes):
+        for a in axes:
+            a.grid(alpha=0.3)
+            for v in thresholds.values():
+                a.axvline(v, color="gray", ls=":", lw=1)
+        for label, v in thresholds.items():
+            axes[0].text(v, axes[0].get_ylim()[1], f" {label}", rotation=90, va="top", ha="right", fontsize=8, color="gray")
+
+    fig1, ax = plt.subplots(1, 2, figsize=(11, 4.4))
+    ax[0].plot(x, table["procurement_cost"], label="procurement cost")
+    ax[0].plot(x, table["disutility"], label="disutility")
+    ax[0].plot(x, table["total_cost"], "k--", label="total cost")
+    ax[0].set(xlabel="$E^{min}$ [kWh]", ylabel="DKK", title="Cost")
+    ax[0].legend(fontsize=8)
+    ax[1].plot(x, table["mu"], color="tab:red")
+    ax[1].set(xlabel="$E^{min}$ [kWh]", ylabel="DKK/kWh", title="Marginal cost $\\mu$ of the requirement")
+    mark(ax)
+    _finish(fig1, save_costs)
+
+    fig2, ax2 = plt.subplots(figsize=(7.5, 4.4))
+    ax2.step(x, table["hours_above_ref"], where="post", label="load above reference")
+    ax2.step(x, table["hours_at_Lmin"], where="post", label="load at $L^{min}$")
+    ax2.step(x, table["hours_at_Lmax"], where="post", label="load at $L^{max}$")
+    ax2.set(xlabel="$E^{min}$ [kWh]", ylabel="number of hours", title="Hours in each situation")
+    ax2.legend(fontsize=8)
+    mark([ax2])
+    _finish(fig2, save_hours)
+    return fig1, fig2
+
+
+def plot_cq_sweep(table, increases: dict, save_to: Path | str | None = None) -> plt.Figure:
+    """Question 3.(f): hourly load increase caused by the requirement for several c^Q, and mu / E_free against c^Q."""
+    fig, ax = plt.subplots(1, 2, figsize=(13, 4.2))
+    for cq, inc in increases.items():
+        ax[0].step(inc.index, inc.values, where="mid", label=f"$c^Q$ = {cq:g}")
+    ax[0].set(xlabel="hour", ylabel="load with requirement - load of Question 2.(c) [kWh/h]",
+              title="Where the extra energy is consumed")
+    ax[0].legend(fontsize=8); ax[0].grid(alpha=0.3)
+    ax[1].plot(table["cQ"], table["mu"], color="tab:red", label="$\\mu$")
+    ax[1].set(xlabel="$c^Q$ [DKK/kWh$^2$]", ylabel="$\\mu$ [DKK/kWh]", xscale="log", title="Marginal cost and unconstrained energy")
+    ax2 = ax[1].twinx()
+    ax2.plot(table["cQ"], table["energy_free"], color="tab:green", label="consumption without requirement")
+    ax2.set_ylabel("kWh")
+    ax[1].grid(alpha=0.3)
+    h1, l1 = ax[1].get_legend_handles_labels(); h2, l2 = ax2.get_legend_handles_labels()
+    ax[1].legend(h1 + h2, l1 + l2, fontsize=8, loc="center right")
+    return _finish(fig, save_to)
+
+def plot_battery_schedule(results: Results, without: Results, data: InputData,
+                          save_to: Path | str | None = None) -> plt.Figure:
+    """Question 3.(g).iv: load with and without the battery, battery operation and state of charge."""
+    h, h0 = results.hourly, without.hourly
+    fig, ax = plt.subplots(3, 1, figsize=(10, 9), sharex=True, gridspec_kw={"height_ratios": [3, 2.2, 1.6]})
+    ax[0].step(h.index, h["reference_load"], where="mid", color="tab:blue", ls=":", lw=2, label="reference load")
+    ax[0].step(h0.index, h0["load"], where="mid", color="tab:green", lw=2, label="without battery (Q3.d)")
+    ax[0].step(h.index, h["load"], where="mid", color="tab:red", lw=2, ls="--", label="with battery")
+    ax[0].set(ylabel="kWh/h", title="Optimal load"); ax[0].legend(fontsize=8); ax[0].grid(alpha=0.3)
+    ax[1].bar(h.index, h["charge"], color="tab:blue", alpha=0.7, label="charge")
+    ax[1].bar(h.index, -h["discharge"], color="tab:orange", alpha=0.7, label="discharge (negative)")
+    ax[1].set(ylabel="kWh/h", title="Battery operation and energy price")
+    ax[1].legend(fontsize=8, loc="upper left"); ax[1].grid(alpha=0.3)
+    ax1 = ax[1].twinx()
+    ax1.step(h.index, h["price"], where="mid", color="tab:red", lw=1.5)
+    ax1.set_ylabel("DKK/kWh", color="tab:red")
+    ax[2].plot(h.index, h["soc"], "k-o", ms=3)
+    ax[2].axhline(data.battery_capacity_kWh, color="gray", ls=":")
+    ax[2].set(xlabel="hour", ylabel="kWh", title="State of charge (end of hour)"); ax[2].grid(alpha=0.3)
+    return _finish(fig, save_to)
+
+
+def plot_battery_value(spread, level, capacity, efficiency, save_environment: Path | str | None = None,
+                       save_battery: Path | str | None = None):
+    """Question 3.(g).v, two figures: value of the battery against the environment (price variation, price level)
+    and against the characteristics of the battery (capacity and power, efficiency)."""
+    ylabel = "value of the battery [DKK/day]"
+
+    fig1, ax = plt.subplots(1, 2, figsize=(10, 4.2))
+    ax[0].plot(spread["spread_factor"], spread["value"], "o-")
+    ax[0].set(xlabel="price spread factor (1 = data, 0 = flat prices)", ylabel=ylabel, title="Price variation")
+    ax[1].plot(level["price_shift"], level["value"], "o-")
+    ax[1].set(xlabel="price shift [DKK/kWh]", ylabel=ylabel, title="Price level")
+    for a in ax:
+        a.grid(alpha=0.3)
+    _finish(fig1, save_environment)
+
+    fig2, ax = plt.subplots(1, 2, figsize=(10, 4.2))
+    for power, g in capacity.groupby("power_kW"):
+        ax[0].plot(g["capacity_kWh"], g["value"], "o-", label=f"{power:g} kW")
+    ax[0].set(xlabel="capacity [kWh]", ylabel=ylabel, title="Capacity and power")
+    ax[0].legend(title="charge/discharge power", fontsize=8)
+    ax[1].plot(efficiency["efficiency"], efficiency["value"], "o-")
+    ax[1].set(xlabel="charging = discharging efficiency", ylabel=ylabel, title="Efficiency")
+    for a in ax:
+        a.grid(alpha=0.3)
+    _finish(fig2, save_battery)
+    return fig1, fig2

@@ -21,8 +21,8 @@ import numpy as np
 import pandas as pd
 
 from .data_loader import InputData, load_question
-from .model import LinearDisutilityModel, QuadraticDisutilityModel, TemporalDisutilityModel, Results
-
+from .model import (BatteryModel, LinearDisutilityModel, MinEnergyModel, QuadraticDisutilityModel,
+                    TemporalDisutilityModel, Results)
 
 def scale_prices(data: InputData, factor: float, keep_mean: bool = False) -> InputData:
     """Multiply hourly prices by ``factor``. With ``keep_mean=True`` only the spread around the
@@ -224,4 +224,78 @@ def price_structure_metrics(results: Results, data: InputData, disutility: float
         "total_abs_deviation": float(deviation.abs().sum()),
         "energy_consumed": float(h["load"].sum()),
         "max_discomfort_state": float(h["state"].abs().max()) if "state" in h else float("nan"),
+    }
+
+def solve_min_energy(question: str, min_energy: float | None = None, cQ: float | None = None,
+                     load_max: float | None = None):
+    """Solve the model of Question 3 and, on the same data, the model without the requirement (Question 2.c).
+
+    ``min_energy`` (kWh), ``cQ`` (DKK/kWh^2) and ``load_max`` (kWh/h) override the values of the data files.
+    Returns (results with requirement, results without requirement, data, E^min used).
+    """
+    data = load_question(question)
+    if cQ is not None:
+        data.quadratic_disutility = float(cQ)
+    if load_max is not None:
+        data.load_max_kWh = float(load_max)
+    model = MinEnergyModel(data, min_energy=min_energy)
+    with_req = model.build().solve()
+    free = QuadraticDisutilityModel(data).build().solve()
+    return with_req, free, data, model.min_energy
+
+def min_energy_metrics(with_req: Results, free: Results, data: InputData, e_min: float) -> dict:
+    """Quantities compared in Question 3.(f) for one run (costs in DKK/day, energies in kWh)."""
+    h, h0, tol = with_req.hourly, free.hourly, 1e-6
+    total = -with_req.objective
+    procurement = with_req.meta["procurement_cost"]
+    return {
+        "E_min": e_min,
+        "cQ": data.quadratic_disutility,
+        "L_max": data.load_max_kWh,
+        "energy_free": h0["load"].sum(),
+        "energy": h["load"].sum(),
+        "procurement_cost": procurement,
+        "disutility": total - procurement,
+        "total_cost": total,
+        "requirement_cost": total + free.objective,
+        "mu": with_req.duals["mu"],
+        "hours_above_ref": int((h["load"] > h["reference_load"] + tol).sum()),
+        "hours_at_Lmax": int((h["load"] >= data.load_max_kWh - tol).sum()),
+        "hours_at_Lmin": int((h["load"] <= data.load_min_kWh + tol).sum()),
+        "max_increase": float((h["load"] - h0["load"]).max()),
+    }
+
+def set_battery(data: InputData, capacity: float | None = None, power: float | None = None,
+                efficiency: float | None = None) -> InputData:
+    """Change the battery capacity (kWh), the charging and discharging power (kW, both) and/or the charging and
+    discharging efficiency (both). The initial state of charge keeps its share of the capacity."""
+    new = {}
+    if capacity is not None:
+        new.update(battery_capacity_kWh=capacity,
+                   battery_initial_soc_kWh=data.battery_initial_soc_kWh / data.battery_capacity_kWh * capacity)
+    if power is not None:
+        new.update(battery_max_charge_kW=power, battery_max_discharge_kW=power)
+    if efficiency is not None:
+        new.update(battery_charging_efficiency=efficiency, battery_discharging_efficiency=efficiency)
+    return replace(data, **new)
+
+
+def solve_battery(data: InputData):
+    """Solve the model with the battery (Question 3.g) and, on the same data, without it (Question 3.d)."""
+    with_battery = BatteryModel(data).build().solve()
+    without = MinEnergyModel(data).build().solve()
+    return with_battery, without
+
+
+def battery_metrics(with_battery: Results, without: Results) -> dict:
+    """Value of the battery = net utility with the battery - net utility without it (= reduction of the total cost, DKK/day)."""
+    h = with_battery.hourly
+    return {
+        "cost_without": -without.objective,
+        "cost_with": -with_battery.objective,
+        "value": with_battery.objective - without.objective,
+        "charged_kWh": h["charge"].sum(),
+        "mu_without": without.duals["mu"],
+        "mu_with": with_battery.duals["mu"],
+        "max_overlap": float(np.minimum(h["charge"], h["discharge"]).max()),
     }

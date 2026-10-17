@@ -18,13 +18,15 @@ import numpy as np
 import pandas as pd
 
 from src.data_loader import load_question, list_questions
-from src.model import (FlexibleConsumerModel, LinearDisutilityModel, QuadraticDisutilityModel,
+from src.model import (BatteryModel, FlexibleConsumerModel, LinearDisutilityModel, QuadraticDisutilityModel,
                        TemporalDisutilityModel, MinEnergyModel, Results)
-from src.plotting import (plot_duals, plot_inputs, plot_linear_sweep, plot_load_comparison, plot_load_vs_reference,
+from src.plotting import (plot_battery_schedule, plot_battery_value, plot_cq_sweep, plot_duals, plot_inputs,
+                          plot_linear_sweep, plot_load_comparison, plot_load_vs_reference, plot_min_energy_sweep,
                           plot_price_structure, plot_quadratic_sweep, plot_scenario_comparison, plot_schedule)
-from src.scenarios import (linear_sweep_metrics, linear_thresholds, quadratic_sweep_metrics, quadratic_thresholds,
-                           price_structure_metrics, scale_prices, scale_pv, set_tariffs, solve_linear, solve_model,
-                           solve_quadratic, square_wave_prices)
+from src.scenarios import (battery_metrics, linear_sweep_metrics, linear_thresholds, min_energy_metrics,
+                           price_structure_metrics, quadratic_sweep_metrics, quadratic_thresholds, scale_prices,
+                           scale_pv, set_battery, set_tariffs, shift_prices, solve_battery, solve_linear,
+                           solve_min_energy, solve_model, solve_quadratic, square_wave_prices)
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
@@ -40,6 +42,8 @@ def run_base_case(question: str, out: Path, show: bool) -> Results | None:
         model = QuadraticDisutilityModel(data).build()
     elif question == "Q3":
         model = MinEnergyModel(data).build()
+    elif question == "Q3_battery":
+        model = BatteryModel(data).build()
     else:
         model = FlexibleConsumerModel(data).build()
     print("Model used:", type(model).__name__)
@@ -55,6 +59,8 @@ def run_base_case(question: str, out: Path, show: bool) -> Results | None:
     plot_duals(results, data, save_to=out / "duals.png")
     if question == "Q3":
         compare_with_unconstrained(results, data, out)
+    if question == "Q3_battery":
+        compare_with_without_battery(results, data, out)
     if show:
         matplotlib.pyplot.show()
     return results
@@ -248,11 +254,110 @@ def main() -> None:
             run_linear_sweep(args.question, out)
         elif args.question == "Q2_quadratic":
             run_quadratic_sweep(args.question, out)
+        elif args.question == "Q3":
+            run_min_energy_sweeps(args.question, out)
+        elif args.question == "Q3_battery":
+            run_battery_sweeps(args.question, out)
         else:
             run_scenarios(args.question, out)
         
     print(f"\nOutputs written to {out}")
 
+def run_min_energy_sweeps(question: str, out: Path) -> None:
+    """Question 3.(f): effect of E^min, of c^Q and of L^max on the consumer (one parameter at a time)."""
+    base = load_question(question)
+    ref_total = float(base.reference_load.sum())
+    cols = ["E_min", "cQ", "L_max", "energy_free", "energy", "procurement_cost", "disutility", "total_cost",
+            "requirement_cost", "mu", "hours_above_ref", "hours_at_Lmax", "hours_at_Lmin", "max_increase"]
+
+    def sweep(param: str, values):
+        return pd.DataFrame([min_energy_metrics(*solve_min_energy(question, **{param: v})) for v in values])[cols]
+
+    # 1. E^min (feasible up to 24 * L^max; the dual is not unique at the limit itself)
+    cap = base.n_hours * base.load_max_kWh
+    fine = sweep("min_energy", np.linspace(0.0, cap - 2.0, 72))
+    e_free = float(fine["energy_free"].iloc[0])
+    plot_min_energy_sweep(fine, {"unconstrained consumption": e_free, "reference total": ref_total,
+                                 "24 $L^{max}$": cap}, save_costs=out / "sweep_Emin_costs.png",
+                          save_hours=out / "sweep_Emin_hours.png")
+    table = sweep("min_energy", [20, 26, 30, ref_total, 40, 50, 60, 80, 100, 120, 140])
+    table.to_csv(out / "sweep_Emin_table.csv", index=False)
+    print(f"Consumption without requirement: {e_free:.2f} kWh, reference total {ref_total:.2f} kWh, 24*Lmax = {cap:.0f} kWh")
+    print(table.drop(columns=["cQ", "L_max"]).round(2).to_string(index=False), "\n")
+
+    # 2. c^Q at the base-case E^min
+    fine = sweep("cQ", np.logspace(-1, np.log10(50), 30))
+    increases = {}
+    for cq in [0.1, 0.5, 1.0, 4.0, 50.0]:
+        with_req, free, _, _ = solve_min_energy(question, cQ=cq)
+        increases[cq] = with_req.hourly["load"] - free.hourly["load"]
+    plot_cq_sweep(fine, increases, save_to=out / "sweep_cQ.png")
+    table = sweep("cQ", [0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0, 50.0])
+    table.to_csv(out / "sweep_cQ_table.csv", index=False)
+    print(table.drop(columns=["E_min", "L_max"]).round(2).to_string(index=False), "\n")
+
+    # 3. hourly upper bound L^max at the base-case E^min (feasible if 24 * L^max >= E^min)
+    table = sweep("load_max", [6.0, 5.0, 4.0, 3.0, 2.5, 2.0])
+    table.to_csv(out / "sweep_Lmax_table.csv", index=False)
+    print(table.drop(columns=["E_min", "cQ"]).round(2).to_string(index=False), "\n")
+
+def compare_with_without_battery(results: Results, data, out: Path) -> None:
+    """Question 3.(g).iv: the base case with the battery against the same consumer without it (Question 3.d)."""
+    without = MinEnergyModel(data).build().solve()
+    rows = {}
+    for name, r in (("without battery (Q3.d)", without), ("with battery", results)):
+        h = r.hourly
+        procurement = r.meta["procurement_cost"]
+        total = -r.objective
+        rows[name] = {"net utility [DKK]": r.objective, "procurement [DKK]": procurement,
+                      "disutility [DKK]": total - procurement, "import [kWh]": h["import"].sum(),
+                      "export [kWh]": h["export"].sum(), "load [kWh]": h["load"].sum(),
+                      "abs. deviation [kWh]": (h["load"] - h["reference_load"]).abs().sum(),
+                      "hours above reference": int((h["load"] > h["reference_load"] + 1e-6).sum()),
+                      "mu [DKK/kWh]": r.duals["mu"]}
+    table = pd.DataFrame(rows).T
+    print(table.round(2).to_string(), "\n")
+    h = results.hourly
+    print(f"value of the battery: {results.objective - without.objective:.2f} DKK/day")
+    print(f"charged {h['charge'].sum():.2f} kWh, discharged {h['discharge'].sum():.2f} kWh, "
+          f"largest simultaneous charge and discharge: {min_overlap(h):.1e} kWh/h\n")
+    table.to_csv(out / "Q3_battery_comparison.csv")
+    hourly = pd.DataFrame({"price": h["price"], "reference": h["reference_load"], "load_without": without.hourly["load"],
+                           "load_with": h["load"], "charge": h["charge"], "discharge": h["discharge"], "soc": h["soc"]})
+    hourly.to_csv(out / "Q3_battery_comparison_hourly.csv", index_label="hour")
+    plot_battery_schedule(results, without, data, save_to=out / "battery_schedule.png")
+
+
+def min_overlap(h) -> float:
+    """Largest hourly value of min(charge, discharge): zero if the battery never charges and discharges together."""
+    return float(np.minimum(h["charge"], h["discharge"]).max())
+
+
+def run_battery_sweeps(question: str, out: Path) -> None:
+    """Question 3.(g).v: value of the battery against the price spread, the price level, the battery capacity,
+    the charging/discharging power and the efficiency (one parameter at a time, the others at their base value)."""
+    base = load_question(question)
+
+    def value(data) -> dict:
+        return battery_metrics(*solve_battery(data))
+
+    spread = pd.DataFrame([{"spread_factor": f, **value(scale_prices(base, f, keep_mean=True))}
+                           for f in np.linspace(0.0, 2.5, 11)])
+    level = pd.DataFrame([{"price_shift": s, **value(shift_prices(base, s))} for s in [-0.5, 0.0, 0.5, 1.0]])
+    capacity = pd.DataFrame([{"power_kW": p, "capacity_kWh": c, **value(set_battery(base, capacity=c, power=p))}
+                             for p in [0.5, 1.5, 3.0, 6.0] for c in [1, 2, 4, 8, 12, 16]])
+    efficiency = pd.DataFrame([{"efficiency": e, **value(set_battery(base, efficiency=e))}
+                               for e in [0.7, 0.8, 0.9, 0.95, 1.0]])
+    for name, table in (("spread", spread), ("level", level), ("capacity_power", capacity), ("efficiency", efficiency)):
+        table.to_csv(out / f"battery_sweep_{name}.csv", index=False)
+        plot_battery_value(spread, level, capacity, efficiency,
+                       save_environment=out / "battery_sweeps_environment.png",
+                       save_battery=out / "battery_sweeps_battery.png")
+    cols = ["cost_without", "cost_with", "value", "charged_kWh", "max_overlap"]
+    print(spread[["spread_factor"] + cols].round(2).to_string(index=False), "\n")
+    print(level[["price_shift"] + cols].round(2).to_string(index=False), "\n")
+    print(capacity.pivot(index="power_kW", columns="capacity_kWh", values="value").round(2).to_string(), "\n")
+    print(efficiency[["efficiency"] + cols].round(2).to_string(index=False), "\n")
 
 if __name__ == "__main__":
     main()
